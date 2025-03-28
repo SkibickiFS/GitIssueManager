@@ -57,7 +57,7 @@ namespace Infrastructure.Tests.Services
             _mockHttpMessageHandler.Protected()
                 .Setup<Task<HttpResponseMessage>>(
                     "SendAsync",
-                    ItExpr.IsAny<HttpRequestMessage>(), // Dopasuj dowolne ¿¹danie lub bardziej szczegó³owo
+                    ItExpr.IsAny<HttpRequestMessage>(),
                     ItExpr.IsAny<CancellationToken>()
                 )
                 .ReturnsAsync(new HttpResponseMessage
@@ -65,7 +65,7 @@ namespace Infrastructure.Tests.Services
                     StatusCode = statusCode,
                     Content = new StringContent(jsonResponseContent)
                 })
-                .Verifiable(); // Oznaczamy jako weryfikowalne, jeœli chcemy sprawdziæ, czy zosta³o wywo³ane
+                .Verifiable();
         }
 
         // HttpMessageHandler web errors
@@ -82,7 +82,7 @@ namespace Infrastructure.Tests.Services
 
         #endregion
 
-        #region Tests
+        #region Tests AddIssueAsync
 
         [Fact]
         public async Task AddIssueAsync_Success_ReturnsMappedIssueDetails()
@@ -113,7 +113,7 @@ namespace Infrastructure.Tests.Services
 
             // Assert
             Assert.NotNull(result);
-            Assert.Equal(expectedNodeId, result.Id); 
+            Assert.Equal(expectedNodeId, result.Id);
             Assert.Equal(expectedGitHubNumber.ToString(), result.DisplayId);
             Assert.Equal(request.Title, result.Title);
             Assert.Equal(request.Description, result.Description);
@@ -125,11 +125,11 @@ namespace Infrastructure.Tests.Services
 
             _mockHttpMessageHandler.Protected().Verify(
               "SendAsync",
-              Times.Exactly(1), 
+              Times.Exactly(1),
               ItExpr.Is<HttpRequestMessage>(req =>
-                 req.Method == HttpMethod.Post 
-                 && req.RequestUri.ToString().Contains($"/repos/{_validRepoInfo.Owner}/{_validRepoInfo.RepositoryName}/issues") 
-                 && req.Headers.Authorization.ToString() == $"Bearer {ValidGitHubToken}" 
+                 req.Method == HttpMethod.Post
+                 && req.RequestUri.ToString().Contains($"/repos/{_validRepoInfo.Owner}/{_validRepoInfo.RepositoryName}/issues")
+                 && req.Headers.Authorization.ToString() == $"Bearer {ValidGitHubToken}"
               ),
               ItExpr.IsAny<CancellationToken>()
            );
@@ -209,7 +209,251 @@ namespace Infrastructure.Tests.Services
             await Assert.ThrowsAsync<HttpRequestException>(
                  () => _gitHubService.AddIssueAsync(_validRepoInfo, request)
             );
-        } 
+        }
+        #endregion
+
+        #region Tests UpdateIssueAsync
+
+        [Fact]
+        public async Task UpdateIssueAsync_Success_UpdatesTitleAndDescription_ReturnsMappedIssueDetails()
+        {
+            // Arrange
+            var issueId = "1347";
+            var request = new UpdateIssueRequest { Title = "Updated Title", Description = "Updated Desc" };
+            SetupMockConfiguration(ValidGitHubToken);
+            var fakeJsonResponse = $@"{{ ""id"": 12345, ""node_id"": ""NODE_ID_456"", ""number"": {issueId}, ""title"": ""{request.Title}"", ""body"": ""{request.Description}"", ""state"": ""open"", ""html_url"": ""http://github.com/issues/{issueId}"" }}";
+
+            string? capturedContent = null;
+
+            _mockHttpMessageHandler.Protected()
+                .Setup<Task<HttpResponseMessage>>(
+                    "SendAsync",
+                    ItExpr.IsAny<HttpRequestMessage>(),
+                    ItExpr.IsAny<CancellationToken>()
+                )
+                .Callback<HttpRequestMessage, CancellationToken>((req, ct) =>
+                {
+                    if (req.Content != null)
+                    {
+                        capturedContent = req.Content.ReadAsStringAsync(ct).GetAwaiter().GetResult();
+                    }
+                })
+                .ReturnsAsync(new HttpResponseMessage
+                {
+                    StatusCode = HttpStatusCode.OK,
+                    Content = new StringContent(fakeJsonResponse)
+                });
+
+            // Act
+            var result = await _gitHubService.UpdateIssueAsync(_validRepoInfo, issueId, request);
+
+            // Assert
+            Assert.NotNull(result);
+            Assert.Equal("NODE_ID_456", result.Id);
+            Assert.Equal(request.Title, result.Title);
+            Assert.Equal(request.Description, result.Description);
+
+            _mockHttpMessageHandler.Protected().Verify(
+               "SendAsync",
+               Times.Exactly(1),
+               ItExpr.Is<HttpRequestMessage>(req =>
+                    req.Method == HttpMethod.Patch
+                    && req.RequestUri.ToString().Contains($"/repos/{_validRepoInfo.Owner}/{_validRepoInfo.RepositoryName}/issues/{issueId}")
+                    && req.Headers.Authorization.ToString() == $"Bearer {ValidGitHubToken}"
+               ),
+               ItExpr.IsAny<CancellationToken>()
+            );
+
+            Assert.NotNull(capturedContent);
+
+            Assert.Contains($"\"title\":\"{request.Title}\"", capturedContent);
+            Assert.Contains($"\"body\":\"{request.Description}\"", capturedContent);
+        }
+
+        [Fact]
+        public async Task UpdateIssueAsync_Success_UpdatesOnlyDescription_SendsCorrectPayload()
+        {
+            var issueId = "1349";
+            var request = new UpdateIssueRequest { Title = null, Description = "Only Updated Desc" };
+
+            SetupMockConfiguration(ValidGitHubToken);
+
+            var fakeJsonResponse = $@"{{ ""id"": 9101, ""node_id"": ""NODE_9101"", ""number"": {issueId}, ""title"": ""Old Title"", ""body"": ""{request.Description}"", ""state"": ""open"", ""html_url"": ""url"" }}";
+
+            string? capturedContent = null;
+
+            _mockHttpMessageHandler.Protected()
+                .Setup<Task<HttpResponseMessage>>(
+                    "SendAsync",
+                    ItExpr.IsAny<HttpRequestMessage>(),
+                    ItExpr.IsAny<CancellationToken>()
+                )
+                .Callback<HttpRequestMessage, CancellationToken>((req, ct) =>
+                {
+                    if (req.Content != null)
+                    {
+                        capturedContent = req.Content.ReadAsStringAsync(ct).GetAwaiter().GetResult();
+                    }
+                })
+                .ReturnsAsync(new HttpResponseMessage
+                {
+                    StatusCode = HttpStatusCode.OK,
+                    Content = new StringContent(fakeJsonResponse)
+                });
+
+            // Act
+            var result = await _gitHubService.UpdateIssueAsync(_validRepoInfo, issueId, request);
+
+            // Assert
+            Assert.NotNull(result);
+            Assert.Equal(request.Description, result.Description);
+            Assert.Equal("Old Title", result.Title);
+
+            _mockHttpMessageHandler.Protected().Verify(
+               "SendAsync",
+               Times.Exactly(1),
+               ItExpr.Is<HttpRequestMessage>(req =>
+                    req.Method == HttpMethod.Patch
+                    && req.RequestUri.ToString().Contains($"/issues/{issueId}")
+                    && req.Headers.Authorization.ToString() == $"Bearer {ValidGitHubToken}"
+               ),
+               ItExpr.IsAny<CancellationToken>()
+            );
+
+            Assert.NotNull(capturedContent);
+            Assert.DoesNotContain("\"title\"", capturedContent);
+            Assert.Contains($"\"body\":\"{request.Description}\"", capturedContent);
+        }
+
+        [Fact]
+        public async Task UpdateIssueAsync_NotFound_ThrowsHttpRequestException()
+        {
+            // Arrange
+            var issueId = "non-existent-issue";
+            var request = new UpdateIssueRequest { Title = "Update Title" };
+            var expectedStatusCode = HttpStatusCode.NotFound;
+            var errorJson = @"{""message"": ""Not Found""}";
+
+            SetupMockConfiguration(ValidGitHubToken);
+            SetupMockHttpResponse(expectedStatusCode, errorJson); // 404
+
+            // Act & Assert
+            var exception = await Assert.ThrowsAsync<HttpRequestException>(
+                () => _gitHubService.UpdateIssueAsync(_validRepoInfo, issueId, request)
+            );
+            Assert.Equal(expectedStatusCode, exception.StatusCode);
+            Assert.Contains($"issue '{issueId}' not found", exception.Message);
+        }
+
+        [Fact]
+        public async Task UpdateIssueAsync_OtherApiError_ThrowsHttpRequestException()
+        {
+            // Arrange
+            var issueId = "1350";
+            var request = new UpdateIssueRequest { Title = "Update Title" };
+            var expectedStatusCode = HttpStatusCode.Forbidden; // 403
+            var errorJson = @"{""message"": ""Forbidden""}";
+
+            SetupMockConfiguration(ValidGitHubToken);
+            SetupMockHttpResponse(expectedStatusCode, errorJson);
+
+            // Act & Assert
+            var exception = await Assert.ThrowsAsync<HttpRequestException>(
+                () => _gitHubService.UpdateIssueAsync(_validRepoInfo, issueId, request)
+            );
+            Assert.Equal(expectedStatusCode, exception.StatusCode);
+            Assert.DoesNotContain("not found", exception.Message);
+            Assert.Contains(errorJson, exception.Message);
+        }
+
+
+        [Fact]
+        public async Task UpdateIssueAsync_InvalidJsonResponse_ThrowsJsonException()
+        {
+            // Arrange
+            var issueId = "1351";
+            var request = new UpdateIssueRequest { Title = "Update Title" };
+            var invalidJsonResponse = @"{""invalid_structure"": true}"; 
+
+            SetupMockConfiguration(ValidGitHubToken);
+            SetupMockHttpResponse(HttpStatusCode.OK, invalidJsonResponse);
+
+            // Act & Assert
+            await Assert.ThrowsAsync<JsonException>(
+                () => _gitHubService.UpdateIssueAsync(_validRepoInfo, issueId, request)
+            );
+        }
+
+        [Fact]
+        public async Task UpdateIssueAsync_MissingToken_ThrowsInvalidOperationException()
+        {
+            // Arrange
+            var issueId = "1352";
+            var request = new UpdateIssueRequest { Title = "Update Title" };
+            SetupMockConfiguration(null);
+
+            // Act & Assert
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => _gitHubService.UpdateIssueAsync(_validRepoInfo, issueId, request)
+            );
+        }
+
+        [Fact]
+        public async Task UpdateIssueAsync_NoFieldsToUpdate_ThrowsArgumentException()
+        {
+            // Arrange
+            var issueId = "1353";
+            var request = new UpdateIssueRequest { Title = null, Description = null };
+
+            // Act & Assert
+            var exception = await Assert.ThrowsAsync<ArgumentException>(
+                () => _gitHubService.UpdateIssueAsync(_validRepoInfo, issueId, request)
+            );
+            Assert.Contains("At least Title or Description must be provided", exception.Message);
+        }
+
+        [Fact]
+        public async Task UpdateIssueAsync_NullIssueId_ThrowsArgumentNullException()
+        {
+            // Arrange
+            var request = new UpdateIssueRequest { Title = "Update Title" };
+            string? invalidIssueId = null; 
+
+            // Act & Assert
+            await Assert.ThrowsAsync<ArgumentNullException>(
+                () => _gitHubService.UpdateIssueAsync(_validRepoInfo, invalidIssueId!, request)
+            );
+        }
+
+        [Theory] 
+        [InlineData("")]
+        [InlineData(" ")]
+        public async Task UpdateIssueAsync_EmptyOrWhitespaceIssueId_ThrowsArgumentException(string invalidIssueId)
+        {
+            // Arrange
+            var request = new UpdateIssueRequest { Title = "Update Title" };
+
+            // Act & Assert
+            await Assert.ThrowsAsync<ArgumentException>(
+                () => _gitHubService.UpdateIssueAsync(_validRepoInfo, invalidIssueId, request)
+            );
+        }
+
+        [Fact]
+        public async Task UpdateIssueAsync_NetworkError_ThrowsHttpRequestException()
+        {
+            // Arrange
+            var issueId = "1354";
+            var request = new UpdateIssueRequest { Title = "Update Title" };
+            SetupMockConfiguration(ValidGitHubToken);
+            SetupMockHttpException(new HttpRequestException("Simulated network error"));
+
+            // Act & Assert
+            await Assert.ThrowsAsync<HttpRequestException>(
+                 () => _gitHubService.UpdateIssueAsync(_validRepoInfo, issueId, request)
+            );
+        }
+
         #endregion
     }
 }
