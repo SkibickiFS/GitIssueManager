@@ -191,9 +191,68 @@ namespace Infrastructure.Services
             }
         }
 
-        public Task<IssueDetailsResponse> CloseIssueAsync(RepositoryInfo repoInfo, string issueId, CancellationToken cancellationToken = default)
+        /// <inheritdoc />
+        public async Task<IssueDetailsResponse> CloseIssueAsync(
+            RepositoryInfo repoInfo,
+            string issueId, // 'issue_number'
+            CancellationToken cancellationToken = default)
         {
-            throw new NotImplementedException();
+            ArgumentNullException.ThrowIfNull(repoInfo);
+            ArgumentException.ThrowIfNullOrWhiteSpace(issueId);
+
+            if (repoInfo.Provider != ProviderType.GitHub)
+            {
+                throw new ArgumentException("RepositoryInfo must specify GitHub provider.", nameof(repoInfo));
+            }
+
+            var apiToken = _configuration[GitHubTokenConfigKey];
+            if (string.IsNullOrWhiteSpace(apiToken))
+            {
+                throw new InvalidOperationException($"GitHub API token is missing. Configure it using key: '{GitHubTokenConfigKey}'.");
+            }
+
+            var url = $"repos/{repoInfo.Owner}/{repoInfo.RepositoryName}/issues/{issueId}";
+
+            var payload = new { state = "closed" };
+
+            using var requestMessage = new HttpRequestMessage(HttpMethod.Patch, url);
+            requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiToken);
+            requestMessage.Content = JsonContent.Create(payload);
+            HttpResponseMessage response = await _httpClient.SendAsync(requestMessage, cancellationToken);
+
+            if (response.IsSuccessStatusCode)
+            {
+                try
+                {
+                    var serializerOptions = new JsonSerializerOptions
+                    {
+                        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+                    };
+
+                    GitHubIssueApiResponse gitHubIssue = await response.Content.ReadFromJsonAsync<GitHubIssueApiResponse>(
+                                                            serializerOptions,
+                                                            cancellationToken)
+                                                        ?? throw new InvalidOperationException("GitHub API returned null content unexpectedly after closing issue.");
+
+                    return MapToIssueDetailsResponse(gitHubIssue, repoInfo);
+                }
+                catch (JsonException jsonEx)
+                {
+                    throw;
+                }
+            }
+            else
+            {
+                string errorContent = await response.Content.ReadAsStringAsync(cancellationToken);
+                if (response.StatusCode == HttpStatusCode.NotFound)
+                {
+                    throw new HttpRequestException($"GitHub issue '{issueId}' not found in repository '{repoInfo.Owner}/{repoInfo.RepositoryName}' when trying to close. Status code: {response.StatusCode}.", null, response.StatusCode);
+                }
+                throw new HttpRequestException(
+                    $"GitHub API request failed with status code {response.StatusCode} while closing issue '{issueId}'. URL: {url}. Response: {errorContent}",
+                    null,
+                    response.StatusCode);
+            }
         }
 
         #region private helper methods

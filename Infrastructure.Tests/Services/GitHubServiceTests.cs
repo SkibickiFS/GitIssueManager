@@ -455,5 +455,186 @@ namespace Infrastructure.Tests.Services
         }
 
         #endregion
+
+        #region Tests CloseIssueAsync
+
+        [Fact]
+        public async Task CloseIssueAsync_Success_SendsCorrectPayload_ReturnsMappedClosedIssue()
+        {
+            // Arrange
+            var issueId = "1355";
+            var expectedState = "closed";
+
+            SetupMockConfiguration(ValidGitHubToken);
+
+            var fakeJsonResponse = $@"{{
+            ""id"": 9876,
+            ""node_id"": ""NODE_9876"",
+            ""number"": {issueId},
+            ""title"": ""Issue To Be Closed"",
+            ""body"": ""Some description"",
+            ""state"": ""{expectedState}"",
+            ""html_url"": ""url""
+        }}";
+
+            string? capturedContent = null;
+
+            _mockHttpMessageHandler.Protected()
+                .Setup<Task<HttpResponseMessage>>(
+                    "SendAsync",
+                    ItExpr.IsAny<HttpRequestMessage>(),
+                    ItExpr.IsAny<CancellationToken>()
+                )
+                .Callback<HttpRequestMessage, CancellationToken>((req, ct) =>
+                {
+                    if (req.Content != null)
+                    {
+                        capturedContent = req.Content.ReadAsStringAsync(ct).GetAwaiter().GetResult();
+                    }
+                })
+                .ReturnsAsync(new HttpResponseMessage
+                {
+                    StatusCode = HttpStatusCode.OK,
+                    Content = new StringContent(fakeJsonResponse)
+                });
+
+            // Act
+            var result = await _gitHubService.CloseIssueAsync(_validRepoInfo, issueId);
+
+            // Assert
+            Assert.NotNull(result);
+            Assert.Equal(expectedState, result.State);
+            Assert.Equal("NODE_9876", result.Id);
+            Assert.Equal(issueId, result.DisplayId);
+
+            _mockHttpMessageHandler.Protected().Verify(
+               "SendAsync",
+               Times.Exactly(1),
+               ItExpr.Is<HttpRequestMessage>(req =>
+                    req.Method == HttpMethod.Patch
+                    && req.RequestUri.ToString().Contains($"/issues/{issueId}")
+                    && req.Headers.Authorization.ToString() == $"Bearer {ValidGitHubToken}"
+               ),
+               ItExpr.IsAny<CancellationToken>()
+            );
+
+            Assert.NotNull(capturedContent);
+            using (var doc = JsonDocument.Parse(capturedContent))
+            {
+                Assert.True(doc.RootElement.TryGetProperty("state", out var stateProp));
+                Assert.Equal("closed", stateProp.GetString());
+                Assert.Equal(1, doc.RootElement.EnumerateObject().Count());
+            }
+        }
+
+        [Fact]
+        public async Task CloseIssueAsync_NotFound_ThrowsHttpRequestException()
+        {
+            // Arrange
+            var issueId = "non-existent";
+            var expectedStatusCode = HttpStatusCode.NotFound;
+            var errorJson = @"{""message"": ""Not Found""}"; // 404
+
+            SetupMockConfiguration(ValidGitHubToken);
+            SetupMockHttpResponse(expectedStatusCode, errorJson);
+
+            // Act & Assert
+            var exception = await Assert.ThrowsAsync<HttpRequestException>(
+                () => _gitHubService.CloseIssueAsync(_validRepoInfo, issueId)
+            );
+            Assert.Equal(expectedStatusCode, exception.StatusCode);
+            Assert.Contains($"issue '{issueId}' not found", exception.Message);
+            Assert.Contains("when trying to close", exception.Message);
+        }
+
+        [Fact]
+        public async Task CloseIssueAsync_OtherApiError_ThrowsHttpRequestException()
+        {
+            // Arrange
+            var issueId = "1356";
+            var expectedStatusCode = HttpStatusCode.Forbidden; // 403
+            var errorJson = @"{""message"": ""Forbidden""}";
+
+            SetupMockConfiguration(ValidGitHubToken);
+            SetupMockHttpResponse(expectedStatusCode, errorJson);
+
+            // Act & Assert
+            var exception = await Assert.ThrowsAsync<HttpRequestException>(
+                 () => _gitHubService.CloseIssueAsync(_validRepoInfo, issueId)
+            );
+            Assert.Equal(expectedStatusCode, exception.StatusCode);
+            Assert.DoesNotContain("not found", exception.Message);
+            Assert.Contains(errorJson, exception.Message);
+            Assert.Contains("while closing issue", exception.Message);
+        }
+
+        [Fact]
+        public async Task CloseIssueAsync_InvalidJsonResponse_ThrowsJsonException()
+        {
+            // Arrange
+            var issueId = "1357";
+            var invalidJsonResponse = @"{""malformed"; 
+
+            SetupMockConfiguration(ValidGitHubToken);
+            SetupMockHttpResponse(HttpStatusCode.OK, invalidJsonResponse);
+
+            // Act & Assert
+            await Assert.ThrowsAsync<JsonException>(
+                () => _gitHubService.CloseIssueAsync(_validRepoInfo, issueId)
+            );
+        }
+
+        [Fact]
+        public async Task CloseIssueAsync_MissingToken_ThrowsInvalidOperationException()
+        {
+            // Arrange
+            var issueId = "1358";
+            SetupMockConfiguration(null);
+
+            // Act & Assert
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => _gitHubService.CloseIssueAsync(_validRepoInfo, issueId)
+            );
+        }
+
+        [Fact]
+        public async Task CloseIssueAsync_NullIssueId_ThrowsArgumentNullException()
+        {
+            // Arrange
+            string? invalidIssueId = null;
+
+            // Act & Assert
+            await Assert.ThrowsAsync<ArgumentNullException>(
+                () => _gitHubService.CloseIssueAsync(_validRepoInfo, invalidIssueId!)
+            );
+        }
+
+        [Theory]
+        [InlineData("")]
+        [InlineData(" ")]
+        public async Task CloseIssueAsync_EmptyOrWhitespaceIssueId_ThrowsArgumentException(string invalidIssueId)
+        {
+            // Arrange
+            // Act & Assert
+            await Assert.ThrowsAsync<ArgumentException>(
+                () => _gitHubService.CloseIssueAsync(_validRepoInfo, invalidIssueId)
+            );
+        }
+
+        [Fact]
+        public async Task CloseIssueAsync_NetworkError_ThrowsHttpRequestException()
+        {
+            // Arrange
+            var issueId = "1359";
+            SetupMockConfiguration(ValidGitHubToken);
+            SetupMockHttpException(new HttpRequestException("Simulated network error"));
+
+            // Act & Assert
+            await Assert.ThrowsAsync<HttpRequestException>(
+                 () => _gitHubService.CloseIssueAsync(_validRepoInfo, issueId)
+            );
+        }
+
+        #endregion
     }
 }
