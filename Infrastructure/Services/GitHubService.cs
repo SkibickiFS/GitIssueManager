@@ -1,4 +1,9 @@
-﻿using System;
+﻿using Application.Enums;
+using Application.Interfaces;
+using Application.Models;
+using Microsoft.Extensions.Configuration;
+using System;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -6,10 +11,6 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-using Application.Interfaces;
-using Application.Models;
-using Application.Enums;
-using Microsoft.Extensions.Configuration;
 
 namespace Infrastructure.Services
 {
@@ -84,7 +85,7 @@ namespace Infrastructure.Services
                 {
                     var serializerOptions = new JsonSerializerOptions
                     {
-                        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+                        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
                     };
 
                     GitHubIssueApiResponse gitHubIssue = await response.Content.ReadFromJsonAsync<GitHubIssueApiResponse>(
@@ -109,9 +110,85 @@ namespace Infrastructure.Services
             }
         }
 
-        public Task<IssueDetailsResponse> UpdateIssueAsync(RepositoryInfo repoInfo, string issueId, UpdateIssueRequest request, CancellationToken cancellationToken = default)
+        /// <inheritdoc />
+        public async Task<IssueDetailsResponse> UpdateIssueAsync(
+            RepositoryInfo repoInfo,
+            string issueId, // 'issue_number'
+            UpdateIssueRequest request,
+            CancellationToken cancellationToken = default)
         {
-            throw new NotImplementedException();
+            ArgumentNullException.ThrowIfNull(repoInfo);
+            ArgumentException.ThrowIfNullOrWhiteSpace(issueId);
+            ArgumentNullException.ThrowIfNull(request);
+
+            if (repoInfo.Provider != ProviderType.GitHub)
+            {
+                throw new ArgumentException("RepositoryInfo must specify GitHub provider.", nameof(repoInfo));
+            }
+
+            if (request.Title == null && request.Description == null)
+            {
+                throw new ArgumentException("At least Title or Description must be provided for update.", nameof(request));
+            }
+
+            var apiToken = _configuration[GitHubTokenConfigKey];
+            if (string.IsNullOrWhiteSpace(apiToken))
+            {
+                throw new InvalidOperationException($"GitHub API token is missing. Configure it using key: '{GitHubTokenConfigKey}'.");
+            }
+
+            var url = $"repos/{repoInfo.Owner}/{repoInfo.RepositoryName}/issues/{issueId}";
+
+            var payload = new Dictionary<string, string>();
+            if (request.Title != null)
+            {
+                payload["title"] = request.Title;
+            }
+            if (request.Description != null)
+            {
+                payload["body"] = request.Description;
+            }
+
+            using var requestMessage = new HttpRequestMessage(HttpMethod.Patch, url);
+
+            requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiToken);
+            requestMessage.Content = JsonContent.Create(payload);
+
+            HttpResponseMessage response = await _httpClient.SendAsync(requestMessage, cancellationToken);
+
+            if (response.IsSuccessStatusCode)
+            {
+                try
+                {
+                    var serializerOptions = new JsonSerializerOptions
+                    {
+                        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+                    };
+
+                    GitHubIssueApiResponse gitHubIssue = await response.Content.ReadFromJsonAsync<GitHubIssueApiResponse>(
+                                                            serializerOptions,
+                                                            cancellationToken)
+                                                        ?? throw new InvalidOperationException("GitHub API returned null content unexpectedly after update.");
+
+                    return MapToIssueDetailsResponse(gitHubIssue, repoInfo);
+                }
+                catch (JsonException jsonEx)
+                {
+                    throw;
+                }
+            }
+            else
+            {
+                string errorContent = await response.Content.ReadAsStringAsync(cancellationToken);
+                if (response.StatusCode == HttpStatusCode.NotFound)
+                {
+                    throw new HttpRequestException($"GitHub issue '{issueId}' not found in repository '{repoInfo.Owner}/{repoInfo.RepositoryName}'. Status code: {response.StatusCode}.", null, response.StatusCode);
+                }
+                throw new HttpRequestException(
+                    $"GitHub API request failed with status code {response.StatusCode} while updating issue '{issueId}'. URL: {url}. Response: {errorContent}",
+                    null,
+                    response.StatusCode);
+            }
         }
 
         public Task<IssueDetailsResponse> CloseIssueAsync(RepositoryInfo repoInfo, string issueId, CancellationToken cancellationToken = default)
