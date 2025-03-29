@@ -584,5 +584,186 @@ namespace Infrastructure.Tests.Services
 
         #endregion
 
+        #region Tests CloseIssueAsync
+
+        [Fact]
+        public async Task CloseIssueAsync_Success_SendsCorrectPayload_ReturnsMappedClosedIssue()
+        {
+            // Arrange
+            var issueId = "54329";
+            var expectedState = "resolved";
+            SetupMockBitbucketCredentials(ValidBitbucketUsername, ValidBitbucketAppPassword);
+            var fakeJsonResponse = $@"{{
+            ""id"": {issueId},
+            ""title"": ""Issue To Close"",
+            ""content"": {{""raw"": ""Desc""}},
+            ""state"": ""{expectedState}"",
+            ""links"": {{""html"": {{""href"": ""https://bitbucket.org/test-workspace/test-slug/issues/{issueId}""}}}}
+        }}";
+            string? capturedContent = null;
+            var expectedAuthParam = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{ValidBitbucketUsername}:{ValidBitbucketAppPassword}"));
+
+            _mockHttpMessageHandler.Protected()
+                .Setup<Task<HttpResponseMessage>>(
+                    "SendAsync",
+                    ItExpr.IsAny<HttpRequestMessage>(),
+                    ItExpr.IsAny<CancellationToken>()
+                )
+                .Callback<HttpRequestMessage, CancellationToken>((req, ct) => { if (req.Content != null) { capturedContent = req.Content.ReadAsStringAsync(ct).GetAwaiter().GetResult(); } })
+                .ReturnsAsync(new HttpResponseMessage { StatusCode = HttpStatusCode.OK, Content = new StringContent(fakeJsonResponse) });
+
+            // Act
+            var result = await _bitbucketService.CloseIssueAsync(_validRepoInfo, issueId);
+
+            // Assert
+            Assert.NotNull(result);
+            Assert.Equal(expectedState, result.State);
+            Assert.Equal(issueId, result.Id);
+            Assert.Equal(issueId, result.DisplayId);
+            Assert.Equal("Issue To Close", result.Title);
+            Assert.Equal("Desc", result.Description);
+            Assert.Equal($"https://bitbucket.org/test-workspace/test-slug/issues/{issueId}", result.Url);
+            Assert.Equal(ProviderType.Bitbucket, result.Provider);
+            Assert.Equal(_validRepoInfo.RepositoryName, result.RepositoryName);
+            Assert.Equal(_validRepoInfo.Owner, result.Owner);
+
+
+            _mockHttpMessageHandler.Protected().Verify(
+               "SendAsync",
+               Times.Exactly(1),
+               ItExpr.Is<HttpRequestMessage>(req =>
+                    req.Method == HttpMethod.Put
+                    && req.RequestUri.AbsoluteUri == $"https://api.bitbucket.org/2.0/repositories/{_validRepoInfo.Owner}/{_validRepoInfo.RepositoryName}/issues/{issueId}"
+                    && req.Headers.Authorization != null
+                    && req.Headers.Authorization.Scheme == "Basic"
+                    && req.Headers.Authorization.Parameter == expectedAuthParam
+               ),
+               ItExpr.IsAny<CancellationToken>());
+
+
+            Assert.NotNull(capturedContent);
+            using (var doc = JsonDocument.Parse(capturedContent))
+            {
+                Assert.True(doc.RootElement.TryGetProperty("state", out var stateProp));
+                Assert.Equal("resolved", stateProp.GetString());
+                Assert.Equal(1, doc.RootElement.EnumerateObject().Count());
+            }
+        }
+
+        [Fact]
+        public async Task CloseIssueAsync_NotFound_ThrowsHttpRequestException()
+        {
+            // Arrange
+            var issueId = "non-existent";
+            var expectedStatusCode = HttpStatusCode.NotFound;
+            var errorJson = @"{""error"":{""message"":""Issue not found""}}";
+            SetupMockBitbucketCredentials(ValidBitbucketUsername, ValidBitbucketAppPassword);
+
+            _mockHttpMessageHandler.Protected()
+                .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+                .ReturnsAsync(new HttpResponseMessage { StatusCode = expectedStatusCode, Content = new StringContent(errorJson) });
+
+
+            // Act & Assert
+            var exception = await Assert.ThrowsAsync<HttpRequestException>(
+                () => _bitbucketService.CloseIssueAsync(_validRepoInfo, issueId)
+            );
+            Assert.Equal(expectedStatusCode, exception.StatusCode);
+            Assert.Contains($"issue '{issueId}' or repository", exception.Message);
+            Assert.Contains("when trying to close", exception.Message);
+        }
+
+        [Fact]
+        public async Task CloseIssueAsync_Unauthorized_ThrowsHttpRequestException()
+        {
+            // Arrange
+            var issueId = "54330";
+            var expectedStatusCode = HttpStatusCode.Unauthorized;
+            var errorJson = @"{""error"":{""message"":""Auth failed""}}";
+            SetupMockBitbucketCredentials(ValidBitbucketUsername, ValidBitbucketAppPassword);
+
+            _mockHttpMessageHandler.Protected()
+                .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+                .ReturnsAsync(new HttpResponseMessage { StatusCode = expectedStatusCode, Content = new StringContent(errorJson) });
+
+
+            // Act & Assert
+            var exception = await Assert.ThrowsAsync<HttpRequestException>(
+                 () => _bitbucketService.CloseIssueAsync(_validRepoInfo, issueId)
+            );
+            Assert.Equal(expectedStatusCode, exception.StatusCode);
+            Assert.Contains("when closing issue", exception.Message);
+        }
+
+        [Fact]
+        public async Task CloseIssueAsync_InvalidJsonResponse_ThrowsJsonException()
+        {
+            // Arrange
+            var issueId = "54331";
+            var invalidJsonResponse = @"{""id"": 123";
+            SetupMockBitbucketCredentials(ValidBitbucketUsername, ValidBitbucketAppPassword);
+
+            _mockHttpMessageHandler.Protected()
+                .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+                .ReturnsAsync(new HttpResponseMessage { StatusCode = HttpStatusCode.OK, Content = new StringContent(invalidJsonResponse) });
+
+            // Act & Assert
+            await Assert.ThrowsAsync<JsonException>(
+                () => _bitbucketService.CloseIssueAsync(_validRepoInfo, issueId)
+            );
+        }
+
+        [Fact]
+        public async Task CloseIssueAsync_MissingCredentials_ThrowsInvalidOperationException()
+        {
+            // Arrange
+            var issueId = "54332";
+            SetupMockBitbucketCredentials(null, ValidBitbucketAppPassword); // Missing username
+
+            // Act & Assert
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                 () => _bitbucketService.CloseIssueAsync(_validRepoInfo, issueId)
+            );
+        }
+
+        [Fact]
+        public async Task CloseIssueAsync_NullIssueId_ThrowsArgumentNullException()
+        {
+            // Arrange
+            string? invalidIssueId = null;
+
+            // Act & Assert
+            await Assert.ThrowsAsync<ArgumentNullException>(
+                () => _bitbucketService.CloseIssueAsync(_validRepoInfo, invalidIssueId!)
+            );
+        }
+
+        [Theory]
+        [InlineData("")]
+        [InlineData(" ")]
+        public async Task CloseIssueAsync_EmptyOrWhitespaceIssueId_ThrowsArgumentException(string invalidIssueId)
+        {
+            // Arrange
+            // Act & Assert
+            await Assert.ThrowsAsync<ArgumentException>(
+                 () => _bitbucketService.CloseIssueAsync(_validRepoInfo, invalidIssueId)
+            );
+        }
+
+        [Fact]
+        public async Task CloseIssueAsync_NetworkError_ThrowsHttpRequestException()
+        {
+            // Arrange
+            var issueId = "54333";
+            SetupMockBitbucketCredentials(ValidBitbucketUsername, ValidBitbucketAppPassword);
+            SetupMockHttpExceptionForBitbucket(new HttpRequestException("Simulated network error"));
+
+            // Act & Assert
+            await Assert.ThrowsAsync<HttpRequestException>(
+                 () => _bitbucketService.CloseIssueAsync(_validRepoInfo, issueId)
+            );
+        }
+
+        #endregion
     }
 }
