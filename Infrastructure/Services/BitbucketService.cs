@@ -125,9 +125,88 @@ namespace Infrastructure.Services
             }
         }
 
-        public Task<IssueDetailsResponse> UpdateIssueAsync(RepositoryInfo repoInfo, string issueId, UpdateIssueRequest request, CancellationToken cancellationToken = default)
+        /// <inheritdoc />
+        public async Task<IssueDetailsResponse> UpdateIssueAsync(
+            RepositoryInfo repoInfo,
+            string issueId, // 'issue_id'
+            UpdateIssueRequest request,
+            CancellationToken cancellationToken = default)
         {
-            throw new NotImplementedException();
+            ArgumentNullException.ThrowIfNull(repoInfo);
+            ArgumentException.ThrowIfNullOrWhiteSpace(issueId);
+            ArgumentNullException.ThrowIfNull(request);
+
+            if (repoInfo.Provider != ProviderType.Bitbucket)
+            {
+                throw new ArgumentException("RepositoryInfo must specify Bitbucket provider.", nameof(repoInfo));
+            }
+
+            if (request.Title == null && request.Description == null)
+            {
+                throw new ArgumentException("At least Title or Description must be provided for update.", nameof(request));
+            }
+
+            var username = _configuration[BitbucketUsernameConfigKey];
+            var appPassword = _configuration[BitbucketAppPasswordConfigKey];
+            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(appPassword))
+            {
+                throw new InvalidOperationException($"Bitbucket username or App Password is missing. Configure them using keys: '{BitbucketUsernameConfigKey}', '{BitbucketAppPasswordConfigKey}'.");
+            }
+
+            var url = $"repositories/{repoInfo.Owner}/{repoInfo.RepositoryName}/issues/{issueId}";
+            var credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{appPassword}"));
+            var authHeader = new AuthenticationHeaderValue("Basic", credentials);
+
+            var payload = new Dictionary<string, object>();
+            if (request.Title != null)
+            {
+                payload["title"] = request.Title;
+            }
+            if (request.Description != null)
+            {
+                payload["content"] = new { raw = request.Description };
+            }
+
+            using var requestMessage = new HttpRequestMessage(HttpMethod.Put, url);
+            requestMessage.Headers.Authorization = authHeader;
+            requestMessage.Content = JsonContent.Create(payload, options: new JsonSerializerOptions
+            {
+                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+            });
+            HttpResponseMessage response = await _httpClient.SendAsync(requestMessage, cancellationToken);
+
+            if (response.IsSuccessStatusCode)
+            {
+                try
+                {
+                    var serializerOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                    BitbucketIssueApiResponse bitbucketIssue = await response.Content.ReadFromJsonAsync<BitbucketIssueApiResponse>(
+                                                                serializerOptions,
+                                                                cancellationToken)
+                                                             ?? throw new InvalidOperationException("Bitbucket API returned null content unexpectedly after update.");
+                    return MapToIssueDetailsResponse(bitbucketIssue, repoInfo);
+                }
+                catch (JsonException jsonEx)
+                {
+                    throw;
+                }
+            }
+            else
+            {
+                string errorContent = await response.Content.ReadAsStringAsync(cancellationToken);
+                if (response.StatusCode == HttpStatusCode.NotFound)
+                {
+                    throw new HttpRequestException($"Bitbucket issue '{issueId}' or repository '{repoInfo.Owner}/{repoInfo.RepositoryName}' not found. Status code: {response.StatusCode}. Response: {errorContent}", null, response.StatusCode);
+                }
+                if (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden)
+                {
+                    throw new HttpRequestException($"Bitbucket API authentication/authorization failed when updating issue. Status code: {response.StatusCode}. Response: {errorContent}", null, response.StatusCode);
+                }
+                throw new HttpRequestException(
+                    $"Bitbucket API request failed with status code {response.StatusCode} while updating issue '{issueId}'. URL: {url}. Response: {errorContent}",
+                    null,
+                    response.StatusCode);
+            }
         }
 
         public Task<IssueDetailsResponse> CloseIssueAsync(RepositoryInfo repoInfo, string issueId, CancellationToken cancellationToken = default)
